@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class LawyerBookings extends StatefulWidget {
   const LawyerBookings({Key? key}) : super(key: key);
@@ -8,8 +10,75 @@ class LawyerBookings extends StatefulWidget {
 }
 
 class _LawyerBookingsState extends State<LawyerBookings> {
-  int _currentIndex = 1; // Bookings is selected
-  String _selectedTab = 'Today'; // 'Today' or 'Upcoming'
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  int _currentIndex = 1;
+  String _selectedTab = 'Today';
+  bool _isLoading = true;
+  List<QueryDocumentSnapshot> _bookings = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBookings();
+  }
+
+  Future<void> _loadBookings() async {
+    try {
+      setState(() => _isLoading = true);
+      final String lawyerId = _auth.currentUser!.uid;
+      final DateTime now = DateTime.now();
+      
+      Query query = _firestore.collection('bookings')
+          .where('lawyerId', isEqualTo: lawyerId)
+          .where('status', isEqualTo: 'pending');
+
+      if (_selectedTab == 'Today') {
+        final DateTime endOfDay = DateTime(now.year, now.month, now.day, 23, 59, 59);
+        query = query
+            .where('date', isGreaterThanOrEqualTo: now)
+            .where('date', isLessThanOrEqualTo: endOfDay);
+      } else {
+        query = query
+            .where('date', isGreaterThan: DateTime(now.year, now.month, now.day + 1));
+      }
+
+      final QuerySnapshot snapshot = await query.get();
+      setState(() {
+        _bookings = snapshot.docs;
+        _isLoading = false;
+      });
+    } catch (e) {
+      print('Error loading bookings: $e');
+      setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _updateBookingStatus(String bookingId, String status) async {
+    try {
+      await _firestore.collection('bookings').doc(bookingId).update({
+        'status': status,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Booking $status successfully'),
+          backgroundColor: status == 'accepted' ? Colors.green : Colors.red,
+        ),
+      );
+      
+      _loadBookings(); // Reload the bookings list
+    } catch (e) {
+      print('Error updating booking: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to update booking status'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -20,6 +89,12 @@ class _LawyerBookingsState extends State<LawyerBookings> {
         backgroundColor: const Color(0xFF353E55),
         elevation: 0,
         iconTheme: const IconThemeData(color: Color(0xFFD0A554)),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            Navigator.pushReplacementNamed(context, '/lawyer/dashboard');
+          },
+        ),
       ),
       body: Column(
         children: [
@@ -29,36 +104,47 @@ class _LawyerBookingsState extends State<LawyerBookings> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _buildTabButton('Today', 3),
-                _buildTabButton('Upcoming', 5),
+                _buildTabButton('Today', _bookings.where((doc) => 
+                  (doc.data() as Map<String, dynamic>)['date'].toDate().day == DateTime.now().day
+                ).length),
+                _buildTabButton('Upcoming', _bookings.where((doc) => 
+                  (doc.data() as Map<String, dynamic>)['date'].toDate().isAfter(DateTime.now())
+                ).length),
               ],
             ),
           ),
           const Divider(color: Color(0xFFD0A554), height: 1),
           // Booking cards
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(16.0),
-              children: [
-                _buildBookingCard(
-                  date: '2024-03-20',
-                  name: 'John Doe',
-                  service: 'on call',
-                  number: '+1 234 567 890',
-                  reason: 'Divorce consultation',
-                  timeSlot: '6:00 PM - 7:00 PM',
-                ),
-                const SizedBox(height: 16),
-                _buildBookingCard(
-                  date: '2024-03-22',
-                  name: 'Jane Smith',
-                  service: 'in person',
-                  number: '+1 987 654 321',
-                  reason: 'Property dispute',
-                  timeSlot: '2:30 PM - 3:30 PM',
-                ),
-              ],
-            ),
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _bookings.isEmpty
+                    ? const Center(
+                        child: Text(
+                          'No bookings found',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(16.0),
+                        itemCount: _bookings.length,
+                        itemBuilder: (context, index) {
+                          final booking = _bookings[index].data() as Map<String, dynamic>;
+                          final DateTime bookingDate = booking['date'].toDate();
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 16.0),
+                            child: _buildBookingCard(
+                              bookingId: _bookings[index].id,
+                              date: '${bookingDate.year}-${bookingDate.month.toString().padLeft(2, '0')}-${bookingDate.day.toString().padLeft(2, '0')}',
+                              name: booking['clientName'] ?? 'N/A',
+                              service: booking['serviceType'] ?? 'N/A',
+                              number: booking['clientPhone'] ?? 'N/A',
+                              reason: booking['reason'] ?? 'N/A',
+                              timeSlot: booking['timeSlot'] ?? 'N/A',
+                            ),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
@@ -71,6 +157,7 @@ class _LawyerBookingsState extends State<LawyerBookings> {
       onTap: () {
         setState(() {
           _selectedTab = title;
+          _loadBookings(); // Reload bookings when tab changes
         });
       },
       child: Container(
@@ -111,6 +198,7 @@ class _LawyerBookingsState extends State<LawyerBookings> {
   }
 
   Widget _buildBookingCard({
+    required String bookingId,
     required String date,
     required String name,
     required String service,
@@ -151,9 +239,7 @@ class _LawyerBookingsState extends State<LawyerBookings> {
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 TextButton(
-                  onPressed: () {
-                    // Handle reject action
-                  },
+                  onPressed: () => _updateBookingStatus(bookingId, 'rejected'),
                   child: const Text(
                     'Reject',
                     style: TextStyle(
@@ -167,9 +253,7 @@ class _LawyerBookingsState extends State<LawyerBookings> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFD0A554),
                   ),
-                  onPressed: () {
-                    // Handle accept action
-                  },
+                  onPressed: () => _updateBookingStatus(bookingId, 'accepted'),
                   child: const Text(
                     'Accept',
                     style: TextStyle(
@@ -223,16 +307,16 @@ class _LawyerBookingsState extends State<LawyerBookings> {
         });
         switch (index) {
           case 0:
-            Navigator.pushReplacementNamed(context, '/lawyer-dashboard');
+            Navigator.pushReplacementNamed(context, '/lawyer/dashboard');
             break;
           case 1:
             // Already on bookings page
             break;
           case 2:
-            Navigator.pushReplacementNamed(context, '/lawyer-availability');
+            Navigator.pushReplacementNamed(context, '/lawyer/availability');
             break;
           case 3:
-            Navigator.pushReplacementNamed(context, '/lawyer-profile');
+            Navigator.pushReplacementNamed(context, '/lawyer/profile');
             break;
         }
       },
@@ -242,7 +326,7 @@ class _LawyerBookingsState extends State<LawyerBookings> {
       unselectedItemColor: Colors.grey[400],
       items: const [
         BottomNavigationBarItem(
-          icon: Icon(Icons.home),
+          icon: Icon(Icons.dashboard),
           label: 'Dashboard',
         ),
         BottomNavigationBarItem(
